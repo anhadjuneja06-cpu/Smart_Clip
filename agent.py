@@ -38,11 +38,12 @@ def _add_ffmpeg_to_path():
 _add_ffmpeg_to_path()
 
 from dotenv import load_dotenv
+load_dotenv()
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
-load_dotenv()
 console = Console()
 
 
@@ -65,12 +66,6 @@ Examples:
     )
     parser.add_argument(
         "--url", required=True, help="YouTube video URL to process"
-    )
-    parser.add_argument(
-        "--model",
-        default="base",
-        choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: base)",
     )
     args = parser.parse_args()
 
@@ -96,27 +91,42 @@ Examples:
         console.print(f"\n[bold red]✗ Video ingest failed:[/bold red] {e}")
         sys.exit(1)
 
-    # ── Node 2: Transcribe Audio ─────────────────────────────────────────────
-    try:
-        from nodes.transcribe_audio import transcribe
-        segments = transcribe(video_data["audio_path"], args.model, console)
-    except Exception as e:
-        console.print(f"\n[bold red]✗ Transcription failed:[/bold red] {e}")
-        sys.exit(1)
-
-    # ── Save output ──────────────────────────────────────────────────────────
+    # ── Output dir + transcript cache ────────────────────────────────────────
     output_dir = Path("oz_clips") / video_data["safe_title"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     transcript_path = output_dir / "transcript.json"
-    transcript_data = {
-        "source_url": args.url,
-        "title": video_data["title"],
-        "duration_seconds": video_data["duration_seconds"],
-        "segments": segments,
-    }
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+
+    force_transcribe = os.getenv("OZ_FORCE_TRANSCRIBE", "").strip().lower() in {"1", "true", "yes", "y"}
+    segments = None
+    if transcript_path.exists() and not force_transcribe:
+        try:
+            cached = json.loads(transcript_path.read_text(encoding="utf-8"))
+            cached_segments = cached.get("segments", [])
+            if isinstance(cached_segments, list) and len(cached_segments) > 0:
+                segments = cached_segments
+                console.print("\n[bold blue]┌─ Step 2/2 — Transcribe Audio (cached)[/bold blue]")
+                console.print(f"[dim]   Using cached transcript: {transcript_path}[/dim]")
+        except Exception:
+            segments = None
+
+    # ── Node 2: Transcribe Audio ─────────────────────────────────────────────
+    if segments is None:
+        try:
+            from nodes.transcribe_audio import transcribe
+            segments = transcribe(video_data["audio_path"], args.model, console)
+        except Exception as e:
+            console.print(f"\n[bold red]✗ Transcription failed:[/bold red] {e}")
+            sys.exit(1)
+
+        transcript_data = {
+            "source_url": args.url,
+            "title": video_data["title"],
+            "duration_seconds": video_data["duration_seconds"],
+            "segments": segments,
+        }
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            json.dump(transcript_data, f, indent=2, ensure_ascii=False)
 
     # ── Node 3: LLM Scoring Agent ────────────────────────────────────────────
     try:
